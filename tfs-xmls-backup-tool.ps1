@@ -1,21 +1,32 @@
 ﻿<# 
   .SYNOPSIS
-  Blah Blah Blah
+  Tool for backup TFS configurations (xml files)
 
   .DESCRIPTION
-  Blah Blah Blah
+  The tool backup TFS configurations in a git repository
+  Can be used to backup multiple projects under the same collection
 
-  .PARAMETER BuildDefinitionName
-  Blah Blah Blah
+  .PARAMETER WitadminPath
+  witadmin.exe path (if not set, the tool will search for it)
+  Example: "C:\Program Files (x86)\Microsoft Visual Studio 14.0\Common7\IDE"
 
-  .PARAMETER CollectionUrl
-  Blah Blah Blah
+  .PARAMETER TfsCollectionUrl
+  TFS collection Url
+  Example: "http://tfsserver:8080/tfs/DefaultCollection"
+
+  .PARAMETER TfsTeamProjects
+  Team projects names to backup separated by ','
+  Example: Project1,Project2,Project3
+
+  .PARAMETER BackupRepository
+  Git repository url to store the backup
+  Example: "http://tfsserver:8080/tfs/DefaultCollection/Clients/_git/MyRepo"
 
   .USING
-  Blah Blah Blah
-
+  .\tfs-xmls-backup-tool.ps1 -TfsCollectionUrl -TfsTeamProjects -BackupRepository | -WitadminPath
+  
   .EXAMPLE
-  Blah Blah Blah
+  .\tfs-xmls-backup-tool.ps1 -TfsCollectionUrl "http://tfsserver:8080/tfs/DefaultCollection" -TfsTeamProjects "Project1,Project2,Project3" -BackupRepository "http://tfsserver:8080/tfs/DefaultCollection/Clients/_git/MyRepo" -WitadminPath "C:\Program Files (x86)\Microsoft Visual Studio 14.0\Common7\IDE"
 
   .CONTRIBUTING
   Please feel free to contribute.
@@ -23,7 +34,7 @@
   .NOTES
   Leon Jalfon 
   DevOps & ALM Architect
-  Sela Software Labs Ltd
+  leonj@sela.co.il
 #>
 
 param
@@ -37,7 +48,6 @@ param
     [Parameter(Mandatory=$false)]
     [string]$BackupRepository
 )
-
 
 ########################### FUNCTIONS ###########################
 
@@ -193,10 +203,20 @@ $WitadminPath = Test-WitadminPath -Path $WitadminPath
 # Initialize Workspace (Clone Repository)
 
 $workspace = (Get-Location).ToString() + "\workspace-" + (Get-Date -Format "yyyyMMddHHmmss")
-Write-Host "Cloning Backup Repository to {$workspace}" -ForegroundColor Yellow
+Write-Host "Cloning Backup Repository to {$workspace}"
 $CloneRepositoryCommand = "git clone $BackupRepository `"$workspace`""
 $CommandResponse = Run-CmdCommand -Command $CloneRepositoryCommand -WorkingDirectory (Get-Location) -WaitProcessToFinish $true -CheckRateSeconds "5" -TimeoutMinutes "5"
-Remove-Item $workspace\* -exclude .git -Recurse
+if($CommandResponse[0] -ne 1){Write-Host "Backup repository successfully cloned" -ForegroundColor Yellow}
+else{Write-Host "Unexpected error cloning backup repository: $CommandResponse" -ForegroundColor Red; Exit 1}
+
+
+# Globallist Backup
+
+$ExportGlobalListCommand = "witadmin exportgloballist /collection:$TfsCollectionUrl /f:`"$workspace\Globallist.xml`""
+Write-Host "Running {$ExportGlobalListCommand}"
+$CommandResponse = Run-CmdCommand -Command $ExportGlobalListCommand -WorkingDirectory $WitadminPath -WaitProcessToFinish $true -CheckRateSeconds "3" -TimeoutMinutes "5"
+if($CommandResponse[0] -ne 1){Write-Host "Export Globallist success" -ForegroundColor Yellow}
+else{Write-Host "Unexpected error exporting globallist: $CommandResponse" -ForegroundColor Red; Exit 1}
 
 
 # Get Backups for Each Project
@@ -215,9 +235,11 @@ foreach($TfsProject in $TfsTeamProjects.Split(','))
 
     # Get WorkItems Types
 
-    $GetWorkItemsTypesCommand = "witadmin listwitd /collection:$TfsCollectionUrl /p:$TfsProject"
-    Write-Host "Running {$GetWorkItemsTypesCommand}" -ForegroundColor Yellow
-    $CommandResponse = Run-CmdCommand -Command $GetWorkItemsTypesCommand -WorkingDirectory $WitadminPath -WaitProcessToFinish $true -CheckRateSeconds "5" -TimeoutMinutes "5"
+    $GetWorkItemsTypesCommand = "witadmin listwitd /collection:$TfsCollectionUrl /p:`"$TfsProject`""
+    Write-Host "Running {$GetWorkItemsTypesCommand}"
+    $CommandResponse = Run-CmdCommand -Command $GetWorkItemsTypesCommand -WorkingDirectory $WitadminPath -WaitProcessToFinish $true -CheckRateSeconds "3" -TimeoutMinutes "5"
+    if($CommandResponse[0] -ne 1){Write-Host "Retrieve workitems types success" -ForegroundColor Yellow}
+    else{Write-Host "Unexpected error retrieving workitem types: $CommandResponse" -ForegroundColor Red}
     $WorkItemsTypes = $CommandResponse[1]
 
 
@@ -228,20 +250,26 @@ foreach($TfsProject in $TfsTeamProjects.Split(','))
         if($WorkItemsType)
         {
             $ExportWorkItemCommand = "witadmin exportwitd /collection:$TfsCollectionUrl /p:`"$TfsProject`" /n:`"$WorkItemsType`" /f:`"$workspace\$TfsProject\$WorkItemsType.xml`""
-            Write-Host "Exporting $WorkItemsType, Running {$ExportWorkItemCommand}" -ForegroundColor Yellow
-            $CommandResponse = Run-CmdCommand -Command $ExportWorkItemCommand -WorkingDirectory $WitadminPath -WaitProcessToFinish $true -CheckRateSeconds "5" -TimeoutMinutes "5"
+            Write-Host "Exporting $WorkItemsType, Running {$ExportWorkItemCommand}"
+            $CommandResponse = Run-CmdCommand -Command $ExportWorkItemCommand -WorkingDirectory $WitadminPath -WaitProcessToFinish $true -CheckRateSeconds "3" -TimeoutMinutes "5"
+            if($CommandResponse[0] -ne 1){Write-Host "Workitem {$WorkItemsType} in {$TfsProject} successfully exported" -ForegroundColor Yellow}
+            else{Write-Host "Unexpected error exporting workitem {$WorkItemsType} in {$TfsProject}: $CommandResponse" -ForegroundColor Red}
         } 
     }
 
     # Export Project Configurations
 
     $ExportCategoriesCommand = "witadmin exportcategories /collection:$TfsCollectionUrl /p:`"$TfsProject`" /f:`"$workspace\$TfsProject\Categories.xml`""
-    Write-Host "Exporting $WorkItemsType, Running {$ExportCategoriesCommand}" -ForegroundColor Yellow
-    $CommandResponse = Run-CmdCommand -Command $ExportCategoriesCommand -WorkingDirectory $WitadminPath -WaitProcessToFinish $true -CheckRateSeconds "5" -TimeoutMinutes "5"
+    Write-Host "Exporting $WorkItemsType, Running {$ExportCategoriesCommand}"
+    $CommandResponse = Run-CmdCommand -Command $ExportCategoriesCommand -WorkingDirectory $WitadminPath -WaitProcessToFinish $true -CheckRateSeconds "3" -TimeoutMinutes "5"
+    if($CommandResponse[0] -ne 1){Write-Host "Categories from {$TfsProject} successfully exported" -ForegroundColor Yellow}
+    else{Write-Host "Unexpected error exporting Categories from {$TfsProject}: $CommandResponse" -ForegroundColor Red}
 
     $ExportProcessConfigCommand = "witadmin exportprocessconfig /collection:$TfsCollectionUrl /p:`"$TfsProject`" /f:`"$workspace\$TfsProject\ProcessConfig.xml`""
-    Write-Host "Exporting $WorkItemsType, Running {$ExportProcessConfigCommand}" -ForegroundColor Yellow
-    $CommandResponse = Run-CmdCommand -Command $ExportProcessConfigCommand -WorkingDirectory $WitadminPath -WaitProcessToFinish $true -CheckRateSeconds "5" -TimeoutMinutes "5"
+    Write-Host "Exporting $WorkItemsType, Running {$ExportProcessConfigCommand}"
+    $CommandResponse = Run-CmdCommand -Command $ExportProcessConfigCommand -WorkingDirectory $WitadminPath -WaitProcessToFinish $true -CheckRateSeconds "3" -TimeoutMinutes "5"
+    if($CommandResponse[0] -ne 1){Write-Host "ProcessConfig from {$TfsProject} successfully exported" -ForegroundColor Yellow}
+    else{Write-Host "Unexpected error exporting ProcessConfig from {$TfsProject}: $CommandResponse" -ForegroundColor Red}
 }
 
 
@@ -249,19 +277,23 @@ foreach($TfsProject in $TfsTeamProjects.Split(','))
 
 $GitAddCommand = "git add -A"
 Write-Host "Running Command {$GitAddCommand}" -ForegroundColor Yellow
-$CommandResponse = Run-CmdCommand -Command $GitAddCommand -WorkingDirectory $workspace -WaitProcessToFinish $true -CheckRateSeconds "5" -TimeoutMinutes "5"
-    
+$CommandResponse = Run-CmdCommand -Command $GitAddCommand -WorkingDirectory $workspace -WaitProcessToFinish $true -CheckRateSeconds "3" -TimeoutMinutes "5"
+if($CommandResponse[0] -ne 1){Write-Host "Command {$GitAddCommand} success" -ForegroundColor Yellow}
+else{Write-Host "Unexpected error running command {$GitAddCommand}: $CommandResponse" -ForegroundColor Red}
+
+
 $GitCommitCommand = "git commit -m `"Backup $(Get-Date -Format "dd-MM-yyyy HH:mm")`""
 Write-Host "Running Command {$GitCommitCommand}" -ForegroundColor Yellow
-$CommandResponse = Run-CmdCommand -Command $GitCommitCommand -WorkingDirectory $workspace -WaitProcessToFinish $true -CheckRateSeconds "5" -TimeoutMinutes "5"
+$CommandResponse = Run-CmdCommand -Command $GitCommitCommand -WorkingDirectory $workspace -WaitProcessToFinish $true -CheckRateSeconds "3" -TimeoutMinutes "5"
+
 
 if($CommandResponse[0] -ne 1)
 {
     $GitPushCommand = "git push"
     Write-Host "Running Command {$GitPushCommand}" -ForegroundColor Yellow
-    $CommandResponse = Run-CmdCommand -Command $GitPushCommand -WorkingDirectory $workspace -WaitProcessToFinish $true -CheckRateSeconds "5" -TimeoutMinutes "5"
+    $CommandResponse = Run-CmdCommand -Command $GitPushCommand -WorkingDirectory $workspace -WaitProcessToFinish $true -CheckRateSeconds "3" -TimeoutMinutes "5"
 
-    if($CommandResponse[0] -eq 0) { Write-Host "Backup Success" -ForegroundColor Green }
+    if($CommandResponse[0] -eq 0) { Write-Host "Backup Finished" -ForegroundColor Green }
     else { Write-Host "Backup Failed" -ForegroundColor Red }
 }
 else
